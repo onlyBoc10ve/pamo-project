@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: stack for pamouna-ec
+
+Metadata:
+# ------------------------------------------------------------#
+# Metadata
+# ------------------------------------------------------------# 
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: 
+          default: Parameters for VPC
+        Parameters:
+          - VPCCIDR
+
+Parameters:
+# ------------------------------------------------------------#
+# Parameters
+# ------------------------------------------------------------# 
+
+  MySQLMajorVersion:
+    Type: String
+    Default: "8.0"
+  MySQLMinorVersion:
+    Type: String
+    Default: "42"
+  DBInstanceClass:
+    Type: String
+    Default: "db.t4g.micro" 
+  DBInstanceStorageSize:
+    Type: String
+    Default: "30"
+  DBName:
+    Type: String
+    Default: "db"
+  DBMasterUserName:
+    Type: String
+    Default: "admin"
+  DBPassword: 
+    Default: "password"
+    Type: String
+  Env:
+    Type: String
+    Description:  In the dev environment, multi-AZ resources become single-AZ
+    AllowedValues:
+      - prod
+      - dev
+    Default: dev
+
+# ------------------------------------------------------------#
+# Conditions
+# ------------------------------------------------------------# 
+Conditions:
+  isProdConditon:
+    !Equals [!Ref Env, prod]
+  isNotProdCondition: 
+    !Not [ !Equals [ !Ref Env, "prod" ] ]
+
+
+Resources:
+# ------------------------------------------------------------#
+# Conditions
+# ------------------------------------------------------------# 
+  DBInstance: 
+    Type: "AWS::RDS::DBInstance"
+    Properties: 
+      DBInstanceIdentifier: 
+        !Sub
+          - ${Project}-${Env}-RDS-MySQL
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+      Engine: MySQL
+      DBInstanceClass: !Ref DBInstanceClass
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      EngineVersion: !Sub "${MySQLMajorVersion}.${MySQLMinorVersion}"
+      AllocatedStorage: !Ref DBInstanceStorageSize
+      DBName:        
+        !Sub
+          - ${Project}${Env}RDSMySQL
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+      MasterUsername: !Ref DBMasterUserName
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: true
+      MultiAZ: !If
+        - isProdConditon
+        - true
+        - false
+      AutoMinorVersionUpgrade: false
+      DBParameterGroupName: !Ref DBParameterGroup  
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: 
+            !Sub
+              - ${Project}-${Env}-RDS-MySQL
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+    DeletionPolicy: "Delete"
+
+# ------------------------------------------------------------#
+#  DBParameterGroup
+# ------------------------------------------------------------#
+  DBParameterGroup:
+    Type: "AWS::RDS::DBParameterGroup"
+    Properties:
+      Family: !Sub "MySQL${MySQLMajorVersion}"
+      Description: 
+        !Sub
+          - ${Project}-${Env}-RDS-MySQL-ParameterGroup
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+
+
+# ------------------------------------------------------------#
+#  SecurityGroup for RDS (MySQL)
+# ------------------------------------------------------------#
+  RDSSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !ImportValue VPC
+      GroupName: 
+        !Sub
+          - ${Project}-${Env}-RDS-SecurityGroup
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+      GroupDescription: "SecurityGroup for RDS"
+      Tags:
+        - Key: Name
+          Value: 
+            !Sub
+              - ${Project}-${Env}-RDS-SecurityGroup
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+# Rule
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+
+# ------------------------------------------------------------#
+#  DBSubnetGroup
+# ------------------------------------------------------------#
+  DBSubnetGroup: 
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties: 
+      DBSubnetGroupName: 
+        !Sub
+          - ${Project}-${Env}-RDS-subnetGroup
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+      DBSubnetGroupDescription: "subnetGroup for RDS"
+      SubnetIds: 
+        - !ImportValue PrivateSubnetDBA
+        - !ImportValue PrivateSubnetDBC
+
+
+# ------------------------------------------------------------#
+#  elastiCache
+# ------------------------------------------------------------#
+
+  ### ElastiCache Valkeyを構築
+  ElastiCacheValkey:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      ServerlessCacheName:
+        !Sub
+          - ${Project}-${Env}-ElastiCache-valkey
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env      
+      Engine: valkey 
+      CacheUsageLimits:
+        DataStorage:
+          Maximum: 3
+          Unit: GB
+        ECPUPerSecond:
+          Maximum: 2048
+      SubnetIds:
+        - !ImportValue PrivateSubnetDBA
+        - !ImportValue PrivateSubnetDBC
+      SecurityGroupIds:
+        - !Ref elastiCacheSecurityGroup
+      Tags:
+        - Key: Name
+          Value: 
+            !Sub
+              - ${Project}-${Env}-ElastiCache-valkey
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env      
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+
+  elastiCacheSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !ImportValue VPC
+      GroupName: 
+        !Sub
+          - ${Project}-${Env}-elastiCache-SecurityGroup
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+      GroupDescription: "SecurityGroup for elastiCache"
+      Tags:
+        - Key: Name
+          Value: 
+            !Sub
+              - ${Project}-${Env}-elastiCache-SecurityGroup
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+# Rule
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          CidrIp: 0.0.0.0/0

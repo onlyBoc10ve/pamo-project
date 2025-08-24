@@ -1,0 +1,449 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: stack for pamouna-ec
+
+Metadata:
+# ------------------------------------------------------------#
+# Metadata
+# ------------------------------------------------------------# 
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: 
+          default: Parameters for VPC
+        Parameters:
+          - VPCCIDR
+
+Parameters:
+# ------------------------------------------------------------#
+# Parameters
+# ------------------------------------------------------------# 
+  Env:
+    Type: String
+    Description:  In the dev environment, multi-AZ resources become single-AZ
+    AllowedValues:
+      - prod
+      - dev
+    Default: dev
+
+# ------------------------------------------------------------#
+# Conditions
+# ------------------------------------------------------------# 
+Conditions:
+  isProdConditon:
+    !Equals [!Ref Env, prod]
+  isNotProdCondition: 
+    !Not [ !Equals [ !Ref Env, "prod" ] ]
+
+
+Resources:
+
+# ------------------------------------------------------------#
+# ECS Cluster
+# ------------------------------------------------------------# 
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName:         
+        !Sub
+          - ${Project}-${Env}-pamouna-shop-ECS-Cluster
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+
+  
+# ------------------------------------------------------------#
+# ECS Service
+# ------------------------------------------------------------# 
+
+  ### Prod ECS
+  prodECSService:
+    Type: 'AWS::ECS::Service'
+    Condition: isProdConditon
+    DependsOn: prodListenerHTTP 
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 2
+      LaunchType: 'FARGATE'
+      # LoadBalancers:
+      #   - ContainerName: 'pamouna-shop.com'
+      #     ContainerPort: 80
+      #     TargetGroupArn: !Ref ALBTargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets:
+            - !ImportValue PrivateSubnetECSA
+            - !ImportValue PrivateSubnetECSC
+      PlatformVersion: '1.4.0'
+      TaskDefinition: !Ref ECSTaskDefinition
+
+  ### Dev ECS
+  devECSService:
+    Type: 'AWS::ECS::Service'
+    Condition: isNotProdCondition
+    DependsOn: prodListenerHTTP
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: 'FARGATE'
+      LoadBalancers:
+        - ContainerName: 'pamouna-shop-com'
+          ContainerPort: 80
+          TargetGroupArn: !Ref ALBTargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets:
+            - !ImportValue PrivateSubnetECSA
+      PlatformVersion: '1.4.0'
+      TaskDefinition: !Ref ECSTaskDefinition
+  
+  ### ECS Security Group
+  ECSSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'efs-filesystem securitygroup'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: 'Name'
+          Value: 
+            !Sub
+              - ${Project}-${Env}-ECS-SG
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+      VpcId: !ImportValue VPC
+
+# ------------------------------------------------------------#
+# ECS Task
+# ------------------------------------------------------------# 
+
+  ECSTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      ### Family Nameを定義
+      Family: pamouna-shop-com
+      RequiresCompatibilities:
+        - 'FARGATE'
+      Cpu: 2048
+      Memory: 8192
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      NetworkMode: 'awsvpc'
+      ExecutionRoleArn: !GetAtt IAMRoleECSTaskExecution.Arn
+      TaskRoleArn: !GetAtt IAMRoleAPI.Arn
+
+      ### コンテナ定義
+      ContainerDefinitions:
+        - Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pamouna/pamouna-shop.com:latest
+          Name: 'pamouna-shop-com'
+          Cpu: 2048
+          MemoryReservation: 7680
+          PortMappings:
+            - HostPort: 80
+              Protocol: tcp
+              ContainerPort: 80
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: '/ecs/pamouna-shop.com'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: 'ecs'
+              awslogs-create-group: true
+          Essential: true
+      #### ここを追加する。1.に該当する。
+      Volumes:
+        - Name: 'efs-filesystem'
+          EFSVolumeConfiguration:
+            AuthorizationConfig:
+              AccessPointId: !Ref EFSAccessPoint
+              IAM: 'ENABLED'
+            FilesystemId: !Ref EFSFileSystem
+            TransitEncryption: 'ENABLED'
+
+# ------------------------------------------------------------#
+# IAM Role for API 
+# ------------------------------------------------------------# 
+
+  IAMRoleAPI:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: 'Allow'
+          Principal:
+            Service: 'ecs-tasks.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  IAMRoleECSTaskExecution:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ecs-tasks.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        Policies:
+          - PolicyName: AllowLogsCreation
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: "*"
+
+# ------------------------------------------------------------#
+# EFS Create
+# ------------------------------------------------------------# 
+  EFSFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      BackupPolicy:
+        Status: 'ENABLED'
+      Encrypted: true
+      FileSystemTags:
+        - Key: 'Name'
+          Value: 
+            !Sub
+              - ${Project}-${Env}-TargetGroup
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+      FileSystemPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'elasticfilesystem:ClientWrite'
+              - 'elasticfilesystem:ClientMount'
+            Principal:
+              AWS: !GetAtt IAMRoleAPI.Arn
+
+      ### ライフサイクルポリシー
+      # LifecyclePolicies:
+      #   - TransitionToIA: AFTER_30_DAYS 
+      PerformanceMode: 'generalPurpose'
+      ThroughputMode: 'bursting'
+
+# ------------------------------------------------------------#
+# EFS Mount Target 
+# ------------------------------------------------------------# 
+
+  EFSMountTargetPrivateAppAZA:
+    Type: 'AWS::EFS::MountTarget'
+    Properties: 
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !ImportValue PrivateSubnetECSA
+      SecurityGroups: 
+        - !Ref ECSSecurityGroupEFS
+
+  EFSMountTargetPrivateAppAZC:
+    Type: 'AWS::EFS::MountTarget'
+    Condition: isNotProdCondition
+    Properties: 
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !ImportValue PrivateSubnetECSC
+      SecurityGroups: 
+        - !Ref ECSSecurityGroupEFS
+
+  ECSSecurityGroupEFS:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'efs-filesystem securitygroup'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+      Tags:
+        - Key: 'Name'
+          Value: 
+            !Sub
+              - ${Project}-${Env}-efs
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+      VpcId: !ImportValue VPC
+
+
+# ------------------------------------------------------------#
+# EFS Access Point
+# ------------------------------------------------------------# 
+  EFSAccessPoint:
+    Type: 'AWS::EFS::AccessPoint'
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: "1001"
+        Gid: "1001"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1001"
+          OwnerUid: "1001"
+          Permissions: "0755"
+        Path: "/mnt/efs"
+
+# ------------------------------------------------------------#
+# ALB
+# ------------------------------------------------------------#
+  ### ALB Security Group
+  ALBSecurityGroup:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties:
+          GroupDescription: "Security of ALB"
+          GroupName: 
+            !Sub
+              - ${Project}-${Env}-ALB-SG
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+          VpcId: !ImportValue VPC
+          Tags:
+            - Key: 'Name'
+              Value: 
+                !Sub
+                  - ${Project}-${Env}-ALB-SG
+                  - Project: !ImportValue Project 
+                    Env: !ImportValue Env 
+            - Key: Env
+              Value: !ImportValue Env
+            - Key: Project
+              Value: !ImportValue Project
+          SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 80
+              ToPort: 80
+              CidrIp: 0.0.0.0/0
+            - IpProtocol: tcp
+              FromPort: 443
+              ToPort: 443
+              CidrIp: 0.0.0.0/0 
+
+  ### Prod ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name:
+        !Sub
+          - ${Project}-${Env}-TargetGroup
+          - Project: !ImportValue Project 
+            Env: !ImportValue Env 
+      Tags:
+        - Key: Name
+          Value: 
+            !Sub
+              - ${Project}-${Env}-TargetGroup
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+      Port: 80
+      Protocol: HTTP
+      Matcher:
+        HttpCode: '200'
+      VpcId: !ImportValue VPC
+      TargetType: ip
+
+  # devALBTargetGroup:
+  #   Condition: isNotProdCondition
+  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  #   Properties:
+  #     Name:
+  #       !Sub
+  #         - ${Project}-${Env}-TargetGroup
+  #         - Project: !ImportValue Project 
+  #           Env: !ImportValue Env 
+  #     Tags:
+  #       - Key: Name
+  #         Value: 
+  #           !Sub
+  #             - ${Project}-${Env}-TargetGroup
+  #             - Project: !ImportValue Project 
+  #               Env: !ImportValue Env 
+  #       - Key: Env
+  #         Value: !ImportValue Env
+  #       - Key: Project
+  #         Value: !ImportValue Project
+  #     Port: 80
+  #     Protocol: HTTP
+  #     Matcher:
+  #       HttpCode: '200'
+  #     VpcId: !ImportValue VPC
+  #     TargetType: ip
+
+
+  ALB:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Type: "application"
+        Scheme: "internet-facing"
+        Name: 
+          !Sub
+            - ${Project}-${Env}-pamouna-shop-ALB
+            - Project: !ImportValue Project 
+              Env: !ImportValue Env 
+        Tags:
+        - Key: Name
+          Value: 
+            !Sub
+              - ${Project}-${Env}-pamouna-shop-ALB
+              - Project: !ImportValue Project 
+                Env: !ImportValue Env 
+        - Key: Env
+          Value: !ImportValue Env
+        - Key: Project
+          Value: !ImportValue Project
+        IpAddressType: ipv4
+        Subnets: 
+          - !ImportValue PublicSubnetA
+          - !ImportValue PublicSubnetC
+        SecurityGroups: 
+          - !Ref ALBSecurityGroup
+
+  prodListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  # devListenerHTTP:
+  #   Condition: isNotProdCondition
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     DefaultActions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref devALBTargetGroup
+  #     LoadBalancerArn: !Ref ALB
+  #     Port: 80
+  #     Protocol: HTTP
